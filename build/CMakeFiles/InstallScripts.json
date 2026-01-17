@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/me/projects/shogi-bot/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
