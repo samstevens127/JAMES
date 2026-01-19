@@ -15,27 +15,22 @@ void MCTS::start_new_game()
 {
         pool.reset();
         root_node = pool.allocate_single();
-        root_node->visits.store(0);
-        root_node->value_sum.store(0.0f);
-        root_node->expanded.store(false);
-        root_node->parent_ptr = nullptr;
+        root_node->reset();
 }
 
 void MCTS::update_root(const GameState& state, nshogi::core::Move32 move) {
-        // Try to find the child corresponding to the move
         MCTSNode* next_root = nullptr;
-        for (auto* child : root_node->children) {
-                if (child->move == move) {
-                        next_root = child;
+        for (auto& child : root_node->children()) {
+                if (child.move == move) {
+                        next_root = &child;
                         break;
                 }
         }
         
         if (next_root) {
                 root_node = next_root;
-                root_node->parent_ptr = nullptr; // Detach from old parent
+                root_node->parent_ptr = nullptr; 
         } else {
-                // If move not found, hard reset
                 start_new_game();
         }
 }
@@ -57,11 +52,11 @@ static MCTSNode* select_child_puct(MCTSNode* node)
         MCTSNode* best_child = nullptr;
         uint32_t parent_visits = node->visits.load(std::memory_order_relaxed);
         
-        for (auto* child : node->children) {
-                float curr_puct = child->puct(parent_visits);
+        for (auto& child : node->children()) {
+                float curr_puct = child.puct(parent_visits);
                 
                 if (curr_puct > max_puct) {
-                        best_child = child;
+                        best_child = &child;
                         max_puct = curr_puct;
                 }
         }
@@ -73,7 +68,8 @@ void MCTS::perform_iteration(MCTSNode* root_node, GameState state, std::shared_p
         MCTSNode* node = root_node;
         
         // select with Virtual Loss
-        while (node->expanded.load(std::memory_order_relaxed) && !node->children.empty()) {
+        while (node->expanded.load(std::memory_order_acquire) &&
+                        !(node->children().size()) == 0) {
                 node->virtual_loss.fetch_add(1, std::memory_order_relaxed); 
                 node = select_child_puct(node);
                 state.do_move(node->move);
@@ -90,7 +86,16 @@ void MCTS::perform_iteration(MCTSNode* root_node, GameState state, std::shared_p
         } else {
                 // evaluate
                 if (!node->expanded.load(std::memory_order_acquire)) {
-                        std::unique_lock<std::mutex> lock(node->expansion_mtx);
+                        bool acquired = false;
+                        while (!acquired) {
+                                if (!node->expansion_lock.test_and_set(std::memory_order_acquire)) {
+                                        acquired = true;
+                                } else {
+                                        if (node->expanded.load(std::memory_order_acquire)) 
+                                        break; 
+                                        std::this_thread::yield(); 
+                                }
+                        }
                         if (!node->expanded.load(std::memory_order_relaxed)) {
                         auto future = nn->evaluate_async(state);
                         auto result = future.get(); 
@@ -101,10 +106,10 @@ void MCTS::perform_iteration(MCTSNode* root_node, GameState state, std::shared_p
                         node->expanded.store(true, std::memory_order_release);
                 } else {
                     // Another thread is expanding or already did. 
-                    value = 0.0f; 
+                        value = 0.0f; 
                 }
                 } else {
-            value = 0.0f;
+                        value = 0.0f;
                 }
         }
         
@@ -132,47 +137,67 @@ void MCTS::perform_iteration(MCTSNode* root_node, GameState state, std::shared_p
  * size_t iterations
  */
 
-MCTS::SearchResult MCTS::search(const GameState &root_state, std::shared_ptr<NeuralNetwork> nn, size_t iterations) 
+MCTS::SearchResult MCTS::search(const GameState &root_state,
+                                std::shared_ptr<NeuralNetwork> nn,
+                                size_t iterations) 
 {
         int num_threads = std::thread::hardware_concurrency();
+        if (num_threads < 1)
+                num_threads = 1;
         size_t iter_per_thread = iterations / num_threads;
+        if ((size_t) num_threads > iterations)
+                num_threads = (int) iterations;
+
+        std::atomic<size_t> remaining_iters{iterations};
         std::vector<std::thread> workers;
         
         for (int t = 0; t < num_threads; t++) {
-                workers.emplace_back([this, nn, iter_per_thread, s = root_state.clone()]() mutable {
-                        for (size_t i = 0; i < iter_per_thread; ++i) {
+                workers.emplace_back([this, nn, &remaining_iters, s = root_state.clone()]() mutable {
+                        while (remaining_iters.fetch_sub(1, std::memory_order_relaxed) > 0)
                                 perform_iteration(root_node, s.clone(), nn);
-                        }
                 });
         }
         
         for (auto &t : workers) t.join();
         
         // Selection of best move based on visit count
-        uint32_t max_visits = 0;
-        nshogi::core::Move32 best_move;
-        
-        for (auto* child : root_node->children) {
-                uint32_t v = child->visits.load();
-                if (v > max_visits) {
-                        max_visits = v;
-                        best_move = child->move;
-                }
-        }
-        
         SearchResult result;
-        max_visits = 0;
+        uint32_t max_visits = 0;
+        bool move_found = false;
         
-        for (auto* child : root_node->children) {
-                uint32_t v = child->visits.load();
-                int move_idx = encode_move(root_state, child->move); 
+        auto children = root_node->children();
+
+        if (children.empty())
+                return result;
+                        
+        for (auto& child : children) {
+                uint32_t v = child.visits.load();
+                int move_idx = encode_move(root_state, child.move); 
                 result.visit_counts.push_back({move_idx, v});
-                
+
                 if (v > max_visits) {
                         max_visits = v;
-                        result.best_move = child->move;
+                        result.best_move = child.move;
+                        move_found = true;
                 }
         }
+
+        if (!move_found) {
+                float max_policy = -1.0f;
+                for (auto& child : children) {
+                        if (child.prior > max_policy) {
+                                max_policy = child.prior;
+                                result.best_move = child.move;
+                                move_found = true;
+                        }
+        }
+        
+                if (!move_found) {
+                        std::cout << "CRITICAL: Search failed completely." << std::endl;
+                        if (!children.empty()) result.best_move = children[0].move;
+                }
+        }
+
         result.root_value = root_node->visits.load() > 0 ? 
                               root_node->value_sum.load() / root_node->visits.load() : 0.0f;
         return result;

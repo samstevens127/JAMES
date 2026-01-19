@@ -43,6 +43,8 @@ target_compile_options(mcts_cpp PRIVATE
     -Wextra
     -Wno-unused-parameter
     -g
+    -fno-inline
+    -fno-omit-frame-pointer
 )
 
 target_link_libraries(mcts_cpp PRIVATE

@@ -11,17 +11,18 @@
 #include <cmath>
 #include <mutex>
 #include <iostream>
+#include <span>
+#include "encoder.h"
+
 
 
 using EncodedState = std::array<float, 48 * 9 * 9>;
 
 struct GameState {
-        
-        
         explicit GameState(nshogi::core::State&& s)
           : state(std::make_unique<nshogi::core::State>(std::move(s))) {}
         
-        GameState clone() const 
+        GameState clone() const
         {
                 if (!state) std::cout << "ERROR NULLPTR IN CLONE" << std::endl;
 
@@ -44,6 +45,7 @@ struct GameState {
         
         void do_move(nshogi::core::Move32 m);
         void undo_move();
+
 };
 
 class NodePool;
@@ -51,14 +53,20 @@ class NodePool;
 struct alignas(64) MCTSNode {
         nshogi::core::Move32 move;
         MCTSNode* parent_ptr = nullptr;
-        std::vector<MCTSNode*> children;
         
         std::atomic<int> virtual_loss{0};
         std::atomic<uint32_t> visits{0};
         std::atomic<bool> expanded{false};
         std::atomic<float> value_sum{0.0f}; // total value
         float prior = 0.0f;
-        std::mutex expansion_mtx;
+
+        std::atomic_flag expansion_lock = ATOMIC_FLAG_INIT;
+
+        std::span<MCTSNode> children() const 
+        {
+                return {children_data, num_children};
+        }
+
         inline float value() 
         { 
                 return visits == 0 ? 0.0f : value_sum / visits;
@@ -79,61 +87,50 @@ struct alignas(64) MCTSNode {
         void reset(nshogi::core::Move32 m = nshogi::core::Move32()) {
                 move = m;
                 parent_ptr = nullptr;
-                children.clear(); 
+                children_data = nullptr;
+                num_children = 0;
                 visits.store(0, std::memory_order_relaxed);
                 value_sum.store(0.0f, std::memory_order_relaxed);
                 expanded.store(false, std::memory_order_relaxed);
                 virtual_loss.store(0, std::memory_order_relaxed);
         }
         
-        void expand_with_policy(const GameState &state, const std::vector<float> &pi, NodePool &pool);
+        void expand_with_policy(const GameState &gamestate, const std::vector<float> &pi, NodePool &pool);
         
-        bool is_leaf() { return children.empty(); }
+        bool is_leaf() { return children().size() == 0; }
+
+        private:
+                MCTSNode* children_data;
+                uint32_t num_children;
 };
+
 
 class NodePool {
         public:
-                static constexpr size_t BLOCK_SIZE = 100000000; 
+                static constexpr size_t BLOCK_SIZE = 2e6; 
                 
                 NodePool() {
                         add_block();
                 }
                 
-                MCTSNode* allocate_single() 
-                {
-                        size_t idx = current_idx.fetch_add(1, std::memory_order_relaxed);
-                        
-                        if (idx >= BLOCK_SIZE) {
-                                return nullptr; 
-                        }
-                        return &blocks.back()[idx];
-                }
+                MCTSNode* allocate_single();
                 
-                MCTSNode* allocate_slab(const size_t num_nodes) 
-                {
-                        size_t idx = current_idx.fetch_add(num_nodes, std::memory_order_relaxed);
-                        if (idx + num_nodes > BLOCK_SIZE) return nullptr;
-                        MCTSNode* start = &blocks.back()[idx];
-                        
-                        for (size_t i = 0; i < num_nodes; i++) {
-                                start[i].reset();
-                        }
-                        
-                        return start;
-                }
+                MCTSNode* allocate_slab(const GameState &gamestate, 
+                                        const std::vector<nshogi::core::Move32> &moves,
+                                        const std::vector<float> &policy, 
+                                        MCTSNode *parent_node);
                 
-                void reset() 
-                {
-                        current_idx.store(0, std::memory_order_relaxed);
-                }
+                
+                void reset();
         private:
                 std::deque<std::vector<MCTSNode>> blocks;
-                std::atomic<size_t> current_idx{0};
-                std::mutex expansion_mutex;
+                size_t current_block_idx = 0;
+                size_t current_offset = 0;
+
+                std::mutex pool_mutex;
         
                 void add_block() 
                 {
-                        std::lock_guard<std::mutex> lock(expansion_mutex);
                         blocks.emplace_back(BLOCK_SIZE);
                 }
 };

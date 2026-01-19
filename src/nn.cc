@@ -61,21 +61,22 @@ void NeuralNetwork::batcher_loop()
                         }
                 }
                 
-                if (batch.empty()) continue;
-                
-                // Prepare Batch Tensor
-                std::vector<float> flat_input;
-                flat_input.reserve(batch.size() * 48 * 9 * 9);
-                for (const auto& req : batch) 
-                        flat_input.insert(flat_input.end(), req.state.begin(), req.state.end());
                 
                 
-                auto opts = torch::TensorOptions().dtype(torch::kFloat32);
-                torch::Tensor input_tensor = torch::from_blob(flat_input.data(), 
-                        {(long)batch.size(), 48, 9, 9}, opts).clone().to(device);
-                
-                // Inference
                 try {
+                        // Prepare Batch Tensor
+                        std::vector<float> flat_input;
+                        flat_input.reserve(batch.size() * 48 * 9 * 9);
+                        for (const auto& req : batch) 
+                                flat_input.insert(flat_input.end(), req.state.begin(), req.state.end());
+                        
+                        
+                        auto opts = torch::TensorOptions().dtype(torch::kFloat32);
+                        torch::Tensor input_tensor = torch::from_blob(flat_input.data(), 
+                                {(long)batch.size(), 48, 9, 9}, opts).clone().to(device);
+
+                        // Inference
+
                         auto outputs = module.forward({input_tensor}).toTuple();
                         at::Tensor p_batch = outputs->elements()[0].toTensor().softmax(1).cpu();
                         at::Tensor v_batch = outputs->elements()[1].toTensor().cpu();
@@ -91,6 +92,11 @@ void NeuralNetwork::batcher_loop()
                         }
                 } catch (...) {
                         std::cerr << "Inference failed!" << std::endl;
+                                        // CRITICAL: Notify workers so they don't hang
+                            for (auto& req : batch) {
+                                // You could also use set_exception here
+                                req.promise.set_value({std::vector<float>(13932, 0.0f), 0.0f}); 
+                            }
                 }
         }
 }

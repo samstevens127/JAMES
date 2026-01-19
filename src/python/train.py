@@ -8,7 +8,7 @@ import os
 
 #  Configuration
 MODEL_PATH = "shogi_net.pt"
-ITERATIONS = 8  # MCTS simulations per move
+ITERATIONS = 100  # MCTS simulations per move
 GAMES_PER_EPOCH = 50
 BATCH_SIZE = 32
 LEARNING_RATE = 0.01
@@ -55,9 +55,14 @@ def run_self_play(nnet, pool):
     
     while not state.is_terminal():
         search_result = mcts.search(state, nnet, ITERATIONS)
+
+        if str(search_result.best_move) == "None" or len(search_result.visit_counts) == 0:
+            print("No valid move found (Resign/Mate). Ending game.")
+            break
         
         policy_target = np.zeros(13932, dtype=np.float32)
         total_visits = sum(cnt for _, cnt in search_result.visit_counts)
+
         
         for move_idx, count in search_result.visit_counts:
             if move_idx < 13932:
