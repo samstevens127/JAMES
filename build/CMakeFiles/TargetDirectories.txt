@@ -1,3 +1,0 @@
-/home/me/projects/shogi-bot/build/CMakeFiles/mcts_cpp.dir
-/home/me/projects/shogi-bot/build/CMakeFiles/edit_cache.dir
-/home/me/projects/shogi-bot/build/CMakeFiles/rebuild_cache.dir
