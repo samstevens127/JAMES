@@ -11,7 +11,7 @@
 
 // A struct to hold the result of an evaluation
 struct EvalResult {
-    std::vector<float> policy;
+    torch::Tensor policy;
     float value;
 };
 

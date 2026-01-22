@@ -88,24 +88,16 @@ void NeuralNetwork::batcher_loop()
                         at::Tensor p_batch = outputs->elements()[0].toTensor().softmax(1).cpu();
                         at::Tensor v_batch = outputs->elements()[1].toTensor().cpu();
                         
-                        auto p_accessor = p_batch.accessor<float, 2>();
-                        auto v_accessor = v_batch.accessor<float, 2>();
-
 //                        auto end_inference = std::chrono::high_resolution_clock::now();
 //auto start_distribute = std::chrono::high_resolution_clock::now();
-                        
+
                         for (size_t i = 0; i < batch.size(); ++i) {
-                                std::vector<float> policy(13932);
-
-                                float* src_ptr = p_batch.data_ptr<float>() + (i * 13932);
-                                std::copy(src_ptr, src_ptr + 13932, policy.begin());
-                                batch[i].promise.set_value({policy, v_accessor[i][0]});
-
-                                //for(int j=0; j<13932; ++j) policy[j] = p_accessor[i][j];
-                                //
-                                //batch[i].promise.set_value({policy, v_accessor[i][0]});
+                                // Strategy: Pass a slice of the tensor. 
+                                // .index({(int)i}) creates a view, no deep copy of data happens here.
+                                batch[i].promise.set_value({p_batch.index({(int)i}), v_batch[i][0].item<float>()});
                         }
-//                        auto end_distribute = std::chrono::high_resolution_clock::now();
+                        
+                        auto end_distribute = std::chrono::high_resolution_clock::now();
 //                        std::cout << "Wait: " << std::chrono::duration<float, std::milli>(end_wait - start_wait).count() << "ms "
 //          << "Inference: " << std::chrono::duration<float, std::milli>(end_inference - start_inference).count() << "ms "
 //          << "Distribute: " << std::chrono::duration<float, std::milli>(end_distribute - start_distribute).count() << "ms" << std::endl;
@@ -114,13 +106,13 @@ void NeuralNetwork::batcher_loop()
                                         // CRITICAL: Notify workers so they don't hang
                             for (auto& req : batch) {
                                 // You could also use set_exception here
-                                req.promise.set_value({std::vector<float>(13932, 0.0f), 0.0f}); 
+                                req.promise.set_value({torch::zeros({13932}), 0.0f}); 
                             }
                 } catch (...) {
              std::cerr << "Unknown error in batcher_loop" << std::endl;
              for (auto& req : batch) {
                 try {
-                    req.promise.set_value({std::vector<float>(13932, 0.0f), 0.0f}); 
+                    req.promise.set_value({torch::zeros({13932}), 0.0f}); 
                 } catch (...) {}
              }
             }

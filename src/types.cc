@@ -50,14 +50,14 @@ void GameState::undo_move()
 }
 
 void MCTSNode::expand_with_policy(const GameState &gamestate, 
-                                  const std::vector<float> &policy, 
+                                  const at::Tensor &pi,
                                   NodePool &pool)
 {
         auto moves = gamestate.legal_moves();
         if (moves.empty()) 
                 return;
         
-        MCTSNode* slab = pool.allocate_slab(gamestate, moves, policy, this);
+        MCTSNode* slab = pool.allocate_slab(gamestate, moves, pi, this);
 
         if (!slab) {
                 std::cerr << "MCTSNodePool exhausted! Cannot expand node." << std::endl;
@@ -95,12 +95,14 @@ MCTSNode* NodePool::allocate_single()
 
 MCTSNode* NodePool::allocate_slab(const GameState &gamestate, 
                                         const std::vector<nshogi::core::Move32> &moves,
-                                        const std::vector<float> &policy, 
+                                        const at::Tensor &pi, 
                                         MCTSNode *parent_node) 
 {
         size_t num_nodes = moves.size();
     
         std::lock_guard<std::mutex> lock(pool_mutex);
+
+        auto accessor = pi.accessor<float, 1>();
         
         if (current_offset + num_nodes > BLOCK_SIZE) {
             current_block_idx++;
@@ -120,7 +122,7 @@ MCTSNode* NodePool::allocate_slab(const GameState &gamestate,
             start[i].parent_ptr = parent_node;
             start[i].depth = parent_node->depth + 1;
             int move_idx = encode_move(gamestate, moves[i]);
-            start[i].prior = policy[move_idx];
+            start[i].prior = accessor[move_idx];
         }
         
         return start;

@@ -4,6 +4,7 @@
 #include <nshogi/core/types.h>
 #include <nshogi/core/movelist.h>
 #include <nshogi/io/sfen.h>
+#include <torch/torch.h>
 #include <vector>
 #include <deque>
 #include <array>
@@ -97,7 +98,7 @@ struct alignas(64) MCTSNode {
                 expansion_lock.clear();
         }
         
-        void expand_with_policy(const GameState &gamestate, const std::vector<float> &pi, NodePool &pool);
+        void expand_with_policy(const GameState &gamestate, const at::Tensor &pi, NodePool &pool);
         
         bool is_leaf() { return children().size() == 0; }
 
@@ -119,7 +120,7 @@ class NodePool {
                 
                 MCTSNode* allocate_slab(const GameState &gamestate, 
                                         const std::vector<nshogi::core::Move32> &moves,
-                                        const std::vector<float> &policy, 
+                                        const at::Tensor &pi, 
                                         MCTSNode *parent_node);
                 
                 
