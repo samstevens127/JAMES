@@ -59,6 +59,7 @@ struct alignas(64) MCTSNode {
         std::atomic<bool> expanded{false};
         std::atomic<float> value_sum{0.0f}; // total value
         float prior = 0.0f;
+        uint8_t depth = 0;
 
         std::atomic_flag expansion_lock = ATOMIC_FLAG_INIT;
 
@@ -93,6 +94,7 @@ struct alignas(64) MCTSNode {
                 value_sum.store(0.0f, std::memory_order_relaxed);
                 expanded.store(false, std::memory_order_relaxed);
                 virtual_loss.store(0, std::memory_order_relaxed);
+                expansion_lock.clear();
         }
         
         void expand_with_policy(const GameState &gamestate, const std::vector<float> &pi, NodePool &pool);

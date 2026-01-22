@@ -7,7 +7,7 @@
 bool GameState::is_terminal() const 
 {
         auto ml = nshogi::core::MoveGenerator::generateLegalMoves(*state);
-        return ml.size() == 0;
+        return (ml.size() == 0 && state->getRepetitionStatus(true) == nshogi::core::RepetitionStatus::NoRepetition);
 }
 
 // TODO deal with tie
@@ -118,6 +118,7 @@ MCTSNode* NodePool::allocate_slab(const GameState &gamestate,
         for (size_t i = 0; i < num_nodes; i++) {
             start[i].reset(moves[i]);
             start[i].parent_ptr = parent_node;
+            start[i].depth = parent_node->depth + 1;
             int move_idx = encode_move(gamestate, moves[i]);
             start[i].prior = policy[move_idx];
         }

@@ -42,7 +42,7 @@ PYBIND11_MODULE(mcts_cpp, m) {
         .def("do_move", &GameState::do_move);
         
         py::class_<NeuralNetwork, std::shared_ptr<NeuralNetwork>>(m, "NeuralNetwork")
-        .def(py::init<const std::string&>())
+        .def(py::init<const std::string&, int>(), py::arg("path"), py::arg("queue_size") = 16)
         .def("evaluate", &NeuralNetwork::evaluate_async)
         .def("get_encoded_state", [](NeuralNetwork &self, const GameState &state) {
                 auto encoded = encode_state(state); 

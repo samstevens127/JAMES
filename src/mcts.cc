@@ -2,6 +2,7 @@
 #include "encoder.h"
 #include "types.h"
 #include <limits>
+#include <chrono>
 #include <iostream>
 #include <thread>
 #include <vector>
@@ -86,32 +87,30 @@ void MCTS::perform_iteration(MCTSNode* root_node, GameState state, std::shared_p
         } else {
                 // evaluate
                 if (!node->expanded.load(std::memory_order_acquire)) {
-                        bool acquired = false;
-                        while (!acquired) {
-                                if (!node->expansion_lock.test_and_set(std::memory_order_acquire)) {
-                                        acquired = true;
-                                } else {
-                                        if (node->expanded.load(std::memory_order_acquire)) 
-                                        break; 
-                                        std::this_thread::yield(); 
+                        if (!node->expansion_lock.test_and_set(std::memory_order_acquire)) {
+                                try{
+                                        auto future = nn->evaluate_async(state);
+                                        auto result = future.get(); 
+                                        node->expand_with_policy(state, result.policy, pool);
+                                        value = result.value;
+                                        node->expanded.store(true, std::memory_order_release);
+                                } catch(...) {
+                                        node->expansion_lock.clear(std::memory_order_release);
+                                        node->virtual_loss.fetch_sub(1, std::memory_order_relaxed);
+                                        return;
                                 }
+                                
+                } else {
+                        while (!node->expanded.load(std::memory_order_acquire)) {
+                    std::this_thread::yield(); 
                         }
-                        if (!node->expanded.load(std::memory_order_relaxed)) {
-                        auto future = nn->evaluate_async(state);
-                        auto result = future.get(); 
-                        
-                        node->expand_with_policy(state, result.policy, pool);
-                        value = result.value;
-                        
-                        node->expanded.store(true, std::memory_order_release);
-                } else {
-                    // Another thread is expanding or already did. 
-                        value = 0.0f; 
-                }
-                } else {
-                        value = 0.0f;
-                }
-        }
+                        while (node) {
+                                node->virtual_loss.fetch_sub(1, std::memory_order_relaxed);
+                                node = node->parent_ptr;
+                        }
+                        return;
+                        }
+                } 
         
         // backprop & Remove Virtual Loss
         while (node != nullptr) {
@@ -129,6 +128,7 @@ void MCTS::perform_iteration(MCTSNode* root_node, GameState state, std::shared_p
                 node = node->parent_ptr;
         }
 }
+}
 /* @brief performs search from root
  *
  * @params
@@ -141,14 +141,14 @@ MCTS::SearchResult MCTS::search(const GameState &root_state,
                                 std::shared_ptr<NeuralNetwork> nn,
                                 size_t iterations) 
 {
-        int num_threads = std::thread::hardware_concurrency();
+        //std::thread::hardware_concurrency()
+        int num_threads = std::max(1, 128 - 1);
         if (num_threads < 1)
                 num_threads = 1;
-        size_t iter_per_thread = iterations / num_threads;
         if ((size_t) num_threads > iterations)
                 num_threads = (int) iterations;
 
-        std::atomic<size_t> remaining_iters{iterations};
+        std::atomic<int64_t> remaining_iters{static_cast<int64_t>(iterations)};
         std::vector<std::thread> workers;
         
         for (int t = 0; t < num_threads; t++) {

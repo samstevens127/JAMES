@@ -6,11 +6,15 @@ import numpy as np
 import mcts_cpp  # Your compiled C++ module
 import os
 
+torch.set_num_threads(1) 
+torch.set_num_interop_threads(1)
+
 #  Configuration
 MODEL_PATH = "shogi_net.pt"
-ITERATIONS = 100  # MCTS simulations per move
+ITERATIONS = 800  # MCTS simulations per move
 GAMES_PER_EPOCH = 50
 BATCH_SIZE = 32
+MAX_MOVES = 250
 LEARNING_RATE = 0.01
 
 class ShogiNet(nn.Module):
@@ -53,8 +57,11 @@ def run_self_play(nnet, pool):
     
     game_history = [] # Stores (encoded_state, policy_target)
     
+    move_count = 1
     while not state.is_terminal():
         search_result = mcts.search(state, nnet, ITERATIONS)
+        print(f'{move_count} move played')
+        move_count += 1
 
         if str(search_result.best_move) == "None" or len(search_result.visit_counts) == 0:
             print("No valid move found (Resign/Mate). Ending game.")
@@ -74,8 +81,15 @@ def run_self_play(nnet, pool):
         best_move = search_result.best_move
         state.do_move(best_move)
         mcts.update_root(state, best_move)
+
+        if move_count > MAX_MOVES:
+            break
         
-    final_result = state.result() 
+
+    if move_count > MAX_MOVES:
+        final_result = 0.0
+    else:
+        final_result = state.result() 
     
     processed_samples = []
     current_reward = final_result 
