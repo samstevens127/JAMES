@@ -49,36 +49,22 @@ void GameState::undo_move()
         state->undoMove();
 }
 
-void MCTSNode::expand_with_policy(const GameState &gamestate, 
-                                  const at::Tensor &pi,
-                                  NodePool &pool)
+
+template<bool training>
+void NodePool<training>::reset()
 {
-        auto moves = gamestate.legal_moves();
-        if (moves.empty()) 
-                return;
-        
-        MCTSNode* slab = pool.allocate_slab(gamestate, moves, pi, this);
+        if constexpr (!training)
+                std::lock_guard<std::mutex> lock(pool_mutex);
 
-        if (!slab) {
-                std::cerr << "MCTSNodePool exhausted! Cannot expand node." << std::endl;
-                return; 
-        }
-
-        children_data = slab;
-        num_children = moves.size();
-
-}
-
-void NodePool::reset()
-{
-        std::lock_guard<std::mutex> lock(pool_mutex);
         current_block_idx = 0;
         current_offset = 0;
 }
 
-MCTSNode* NodePool::allocate_single() 
+template<bool training>
+MCTSNode<training>* NodePool<training>::allocate_single() 
 {
-        std::lock_guard<std::mutex> lock(pool_mutex);
+        if constexpr (!training)
+                std::lock_guard<std::mutex> lock(pool_mutex);
 
         if (current_offset + 1 > BLOCK_SIZE) {
                 current_block_idx++;
@@ -89,18 +75,20 @@ MCTSNode* NodePool::allocate_single()
                 }
         }
 
-        MCTSNode* node = &blocks[current_block_idx][current_offset++];
+        MCTSNode<training>* node = &blocks[current_block_idx][current_offset++];
         return node;
 }
 
-MCTSNode* NodePool::allocate_slab(const GameState &gamestate, 
+template<bool training>
+MCTSNode<training>* NodePool<training>::allocate_slab(const GameState &gamestate, 
                                         const std::vector<nshogi::core::Move32> &moves,
                                         const at::Tensor &pi, 
-                                        MCTSNode *parent_node) 
+                                        MCTSNode<training> *parent_node) 
 {
         size_t num_nodes = moves.size();
     
-        std::lock_guard<std::mutex> lock(pool_mutex);
+        if constexpr (!training)
+                std::lock_guard<std::mutex> lock(pool_mutex);
 
         auto accessor = pi.accessor<float, 1>();
         
@@ -114,16 +102,42 @@ MCTSNode* NodePool::allocate_slab(const GameState &gamestate,
         }
         
         
-        MCTSNode* start = &blocks[current_block_idx][current_offset];
+        MCTSNode<training>* start = &blocks[current_block_idx][current_offset];
         current_offset += num_nodes;
         
         for (size_t i = 0; i < num_nodes; i++) {
-            start[i].reset(moves[i]);
-            start[i].parent_ptr = parent_node;
-            start[i].depth = parent_node->depth + 1;
-            int move_idx = encode_move(gamestate, moves[i]);
-            start[i].prior = accessor[move_idx];
+                start[i].reset(moves[i]);
+                start[i].parent_ptr = parent_node;
+                start[i].depth = parent_node->depth + 1;
+                int move_idx = encode_move(gamestate, moves[i]);
+                start[i].prior = accessor[move_idx];
         }
         
         return start;
 }
+
+template<bool training>
+void MCTSNode<training>::expand_with_policy(const GameState &gamestate, 
+                                  const at::Tensor &pi,
+                                  NodePool<training> &pool)
+{
+        auto moves = gamestate.legal_moves();
+        if (moves.empty()) 
+                return;
+        
+        MCTSNode<training>* slab = pool.allocate_slab(gamestate, moves, pi, this);
+
+        if (!slab) {
+                std::cerr << "MCTSNodePool exhausted! Cannot expand node." << std::endl;
+                return; 
+        }
+
+        children_data = slab;
+        num_children = moves.size();
+
+}
+
+template class NodePool<true>;
+template class NodePool<false>;
+template struct MCTSNode<true>;
+template struct MCTSNode<false>;

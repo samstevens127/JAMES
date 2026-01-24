@@ -6,6 +6,7 @@
 #include <nshogi/io/sfen.h>
 #include <torch/torch.h>
 #include <vector>
+#include <type_traits>
 #include <deque>
 #include <array>
 #include <atomic>
@@ -39,32 +40,37 @@ struct GameState {
         GameState& operator=(GameState&& other) = default;
         
         std::unique_ptr<nshogi::core::State> state;
-        bool is_terminal() const;
-        
-        float result() const; 
         std::vector<nshogi::core::Move32> legal_moves() const;
-        
+
+        bool is_terminal() const;
+        float result() const; 
         void do_move(nshogi::core::Move32 m);
         void undo_move();
 
 };
 
+template<bool training>
 class NodePool;
 
+template<typename T, bool training>
+using AtomicIfSearch = std::conditional_t<training, T, std::atomic<T>>;
+
+template<bool training>
 struct alignas(64) MCTSNode {
         nshogi::core::Move32 move;
-        MCTSNode* parent_ptr = nullptr;
-        
-        std::atomic<int> virtual_loss{0};
-        std::atomic<uint32_t> visits{0};
-        std::atomic<bool> expanded{false};
-        std::atomic<float> value_sum{0.0f}; // total value
+        MCTSNode<training>* parent_ptr = nullptr;
+        AtomicIfSearch<float, training> value_sum{0.0f}; // total value
+        AtomicIfSearch<uint32_t, training> visits{0};
+
         float prior = 0.0f;
         uint8_t depth = 0;
 
-        std::atomic_flag expansion_lock = ATOMIC_FLAG_INIT;
+        AtomicIfSearch<bool, training> expanded{false};
 
-        std::span<MCTSNode> children() const 
+        AtomicIfSearch<int, training> virtual_loss{0};
+        AtomicIfSearch<bool, training> is_expanding{false};
+
+        std::span<MCTSNode<training>> children() const 
         {
                 return {children_data, num_children};
         }
@@ -77,9 +83,16 @@ struct alignas(64) MCTSNode {
         template <float cpuct = 2.5f>
         float puct(uint32_t &parent_visits) const 
         {
-                float n = static_cast<float>(visits.load(std::memory_order_relaxed));
-                float vl = static_cast<float>(virtual_loss.load(std::memory_order_relaxed));
-                float s = value_sum.load(std::memory_order_relaxed);
+                float s,n,vl;
+                if constexpr (!training) {
+                        n = static_cast<float>(visits.load(std::memory_order_relaxed));
+                        vl = static_cast<float>(virtual_loss.load(std::memory_order_relaxed));
+                        s = value_sum.load(std::memory_order_relaxed);
+                } else {
+                        n = static_cast<float>(visits);
+                        s = value_sum;
+                        vl = 0.0f;
+                }
                 float q = (n == 0.0) ? 0.0f : s / n;
                 float u = cpuct * prior *
                 std::sqrt((float)parent_visits) / (1.0f + n + vl);
@@ -91,23 +104,30 @@ struct alignas(64) MCTSNode {
                 parent_ptr = nullptr;
                 children_data = nullptr;
                 num_children = 0;
-                visits.store(0, std::memory_order_relaxed);
-                value_sum.store(0.0f, std::memory_order_relaxed);
-                expanded.store(false, std::memory_order_relaxed);
-                virtual_loss.store(0, std::memory_order_relaxed);
-                expansion_lock.clear();
+                if constexpr (!training) {
+                        visits.store(0, std::memory_order_relaxed);
+                        value_sum.store(0.0f, std::memory_order_relaxed);
+                        expanded.store(false, std::memory_order_relaxed);
+                        is_expanding.store(false, std::memory_order_relaxed);
+                        virtual_loss.store(0, std::memory_order_relaxed);
+                } else {
+                        visits = 0;
+                        value_sum = 0.0;
+                        expanded = false;
+                }
         }
         
-        void expand_with_policy(const GameState &gamestate, const at::Tensor &pi, NodePool &pool);
+        void expand_with_policy(const GameState &gamestate, const at::Tensor &pi, NodePool<training> &pool);
         
         bool is_leaf() { return children().size() == 0; }
 
         private:
-                MCTSNode* children_data;
+                MCTSNode<training>* children_data;
                 uint32_t num_children;
 };
 
 
+template<bool training>
 class NodePool {
         public:
                 static constexpr size_t BLOCK_SIZE = 2e6; 
@@ -116,21 +136,21 @@ class NodePool {
                         add_block();
                 }
                 
-                MCTSNode* allocate_single();
-                
-                MCTSNode* allocate_slab(const GameState &gamestate, 
+                MCTSNode<training>* allocate_single();
+                MCTSNode<training>* allocate_slab(const GameState &gamestate, 
                                         const std::vector<nshogi::core::Move32> &moves,
                                         const at::Tensor &pi, 
-                                        MCTSNode *parent_node);
+                                        MCTSNode<training> *parent_node);
                 
                 
                 void reset();
         private:
-                std::deque<std::vector<MCTSNode>> blocks;
+                std::deque<std::vector<MCTSNode<training>>> blocks;
                 size_t current_block_idx = 0;
                 size_t current_offset = 0;
 
-                std::mutex pool_mutex;
+
+                std::conditional_t<!training, std::mutex, bool> pool_mutex;
         
                 void add_block() 
                 {

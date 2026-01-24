@@ -46,14 +46,13 @@ void NeuralNetwork::batcher_loop()
         while (running) {
                 std::vector<Request> batch;
 
-//               auto start_wait = std::chrono::high_resolution_clock::now(); 
                 {
                         std::unique_lock<std::mutex> lock(queue_mtx);
                         cv.wait(lock, [this] { return !queue.empty() || !running; });
                         
                         if (!running && queue.empty()) break;
 
-                        auto timeout = std::chrono::microseconds(150);
+                        auto timeout = std::chrono::milliseconds(3);
 
                         cv.wait_for(lock, timeout, [this] { 
                                 return queue.size() >= (size_t)queue_size; 
@@ -65,8 +64,6 @@ void NeuralNetwork::batcher_loop()
                                 queue.pop();
                         }
                 }
-//                auto end_wait = std::chrono::high_resolution_clock::now();
-//auto start_inference = std::chrono::high_resolution_clock::now();
                 
                 
                 
@@ -88,24 +85,14 @@ void NeuralNetwork::batcher_loop()
                         at::Tensor p_batch = outputs->elements()[0].toTensor().softmax(1).cpu();
                         at::Tensor v_batch = outputs->elements()[1].toTensor().cpu();
                         
-//                        auto end_inference = std::chrono::high_resolution_clock::now();
-//auto start_distribute = std::chrono::high_resolution_clock::now();
 
                         for (size_t i = 0; i < batch.size(); ++i) {
-                                // Strategy: Pass a slice of the tensor. 
-                                // .index({(int)i}) creates a view, no deep copy of data happens here.
                                 batch[i].promise.set_value({p_batch.index({(int)i}), v_batch[i][0].item<float>()});
                         }
                         
-                        auto end_distribute = std::chrono::high_resolution_clock::now();
-//                        std::cout << "Wait: " << std::chrono::duration<float, std::milli>(end_wait - start_wait).count() << "ms "
-//          << "Inference: " << std::chrono::duration<float, std::milli>(end_inference - start_inference).count() << "ms "
-//          << "Distribute: " << std::chrono::duration<float, std::milli>(end_distribute - start_distribute).count() << "ms" << std::endl;
                 } catch (const std::exception& e) {
                         std::cerr << "Inference failed!" << std::endl;
-                                        // CRITICAL: Notify workers so they don't hang
                             for (auto& req : batch) {
-                                // You could also use set_exception here
                                 req.promise.set_value({torch::zeros({13932}), 0.0f}); 
                             }
                 } catch (...) {

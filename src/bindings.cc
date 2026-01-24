@@ -14,10 +14,10 @@ namespace py = pybind11;
 PYBIND11_MODULE(mcts_cpp, m) {
         nshogi::core::initializer::initializeAll();
         
-        py::class_<MCTS::SearchResult>(m, "SearchResult")
-                .def_readonly("best_move", &MCTS::SearchResult::best_move)
-                .def_readonly("visit_counts", &MCTS::SearchResult::visit_counts)
-                .def_readonly("value", &MCTS::SearchResult::root_value);
+        py::class_<MCTS<true>::SearchResult>(m, "SearchResult")
+                .def_readonly("best_move", &MCTS<true>::SearchResult::best_move)
+                .def_readonly("visit_counts", &MCTS<true>::SearchResult::visit_counts)
+                .def_readonly("value", &MCTS<true>::SearchResult::root_value);
         
         py::class_<nshogi::core::Move32>(m, "Move32")
                 .def(py::init<>())
@@ -50,16 +50,25 @@ PYBIND11_MODULE(mcts_cpp, m) {
                 std::memcpy(arr.mutable_data(), encoded.data(), encoded.size() * sizeof(float));
                 return arr;
         }, py::arg("state"));
-        py::class_<NodePool>(m, "NodePool")
+        py::class_<NodePool<true>>(m, "NodePool")
                 .def(py::init<>())
-                .def("reset", &NodePool::reset);
+                .def("reset", &NodePool<true>::reset);
                 
-        py::class_<MCTS>(m, "MCTS")
-                .def(py::init<NodePool&>(), py::arg("pool"))
-                .def("start_new_game", &MCTS::start_new_game)
-                .def("update_root", &MCTS::update_root)
-                .def("search", &MCTS::search, py::arg("state"), py::arg("nn"), py::arg("iterations"),
-                py::return_value_policy::reference, // Don't copy the return value
+        py::class_<MCTS<true>>(m, "JAMES_trainer")
+                .def(py::init<NodePool<true>&, int>(), py::arg("pool"), py::arg("num_threads"))
+                .def("start_new_game", &MCTS<true>::start_new_game)
+                .def("update_root", &MCTS<true>::update_root)
+                .def("search", &MCTS<true>::search, py::arg("state"), py::arg("nn"), py::arg("iterations"),
+                py::return_value_policy::reference, 
+                py::call_guard<py::gil_scoped_release>(),
+                "Search the game tree");
+
+        py::class_<MCTS<false>>(m, "JAMES")
+                .def(py::init<NodePool<false>&, int>(), py::arg("pool"), py::arg("num_threads"))
+                .def("start_new_game", &MCTS<false>::start_new_game)
+                .def("update_root", &MCTS<false>::update_root)
+                .def("search", &MCTS<false>::search, py::arg("state"), py::arg("nn"), py::arg("iterations"),
+                py::return_value_policy::reference, 
                 py::call_guard<py::gil_scoped_release>(),
                 "Search the game tree");
 }

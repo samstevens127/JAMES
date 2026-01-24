@@ -1,7 +1,10 @@
 import torch
+from tqdm import tqdm
+import concurrent.futures
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
+import torch.nn.functional as F
 import numpy as np
 import mcts_cpp  # Your compiled C++ module
 import os
@@ -9,58 +12,84 @@ import os
 torch.set_num_threads(1) 
 torch.set_num_interop_threads(1)
 
-#  Configuration
-MODEL_PATH = "shogi_net.pt"
-ITERATIONS = 800  # MCTS simulations per move
-GAMES_PER_EPOCH = 50
-BATCH_SIZE = 32
-MAX_MOVES = 250
-LEARNING_RATE = 0.01
+class BasicBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(BasicBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+
+    def forward(self, x):
+        residual = x
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = F.relu(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out += residual
+        out = F.relu(out)
+        return out
 
 class ShogiNet(nn.Module):
-    def __init__(self):
+    def __init__(self, num_blocks=10, channels=256):
         super().__init__()
-        self.conv1 = nn.Conv2d(48, 256, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(256)
         
-        # Policy Head 
-        self.p_conv = nn.Conv2d(256, 32, kernel_size=1)
-        self.p_fc = nn.Linear(32 * 9 * 9, 13932) 
+        # Initial Convolution
+        self.conv1 = nn.Conv2d(48, channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(channels)
+        
+        # Residual Tower
+        self.res_blocks = nn.ModuleList([
+            BasicBlock(channels, channels) for _ in range(num_blocks)
+        ])
+        
+        # Policy Head
+        self.p_conv = nn.Conv2d(channels, 32, kernel_size=1, bias=False)
+        self.p_bn = nn.BatchNorm2d(32)
+        self.p_fc = nn.Linear(32 * 9 * 9, 13932)
         
         # Value Head
-        self.v_conv = nn.Conv2d(256, 1, kernel_size=1)
+        self.v_conv = nn.Conv2d(channels, 1, kernel_size=1, bias=False)
+        self.v_bn = nn.BatchNorm2d(1)
         self.v_fc1 = nn.Linear(9 * 9, 64)
         self.v_fc2 = nn.Linear(64, 1)
 
     def forward(self, x):
-        x = torch.relu(self.bn1(self.conv1(x)))
+        # Input
+        x = F.relu(self.bn1(self.conv1(x)))
         
-        # Policy
-        p = torch.relu(self.p_conv(x))
+        # Tower
+        for block in self.res_blocks:
+            x = block(x)
+            
+        # Policy Head
+        p = F.relu(self.p_bn(self.p_conv(x)))
         p = p.view(p.size(0), -1)
         p = self.p_fc(p) 
         
-        # Value
-        v = torch.relu(self.v_conv(x))
+        # Value Head
+        v = F.relu(self.v_bn(self.v_conv(x)))
         v = v.view(v.size(0), -1)
-        v = torch.relu(self.v_fc1(v))
+        v = F.relu(self.v_fc1(v))
         v = torch.tanh(self.v_fc2(v))
         
         return p, v
 
 # Self-Play 
-def run_self_play(nnet, pool):
-    mcts = mcts_cpp.MCTS(pool)
+def run_self_play(nnet):
+    pool = mcts_cpp.NodePool() 
+
+    mcts = mcts_cpp.JAMES_trainer(pool,1)
     mcts.start_new_game()
     
     state = mcts_cpp.GameState.initial() 
     
-    game_history = [] # Stores (encoded_state, policy_target)
+    game_history = [] 
     
     move_count = 1
     while not state.is_terminal():
         search_result = mcts.search(state, nnet, ITERATIONS)
-        print(f'{move_count} move played')
         move_count += 1
 
         if str(search_result.best_move) == "None" or len(search_result.visit_counts) == 0:
@@ -101,6 +130,20 @@ def run_self_play(nnet, pool):
         
     return processed_samples
 
+
+#  Configuration
+MODEL_PATH = "shogi_net.pt"
+
+ITERATIONS = 800  # MCTS simulations per move
+GAMES_PER_EPOCH = 500
+MAX_MOVES = 250
+
+BATCH_SIZE = 128
+QUEUE_SIZE = 128
+NUM_WORKERS = 256
+
+LEARNING_RATE = 0.01
+
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ShogiNet().to(device)
@@ -108,21 +151,28 @@ if __name__ == "__main__":
     script_model = torch.jit.script(model)
     script_model.save(MODEL_PATH)
     
-    pool = mcts_cpp.NodePool() 
     
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
     for epoch in range(100):
         print(f"Epoch {epoch+1}...")
         
-        cpp_net = mcts_cpp.NeuralNetwork(MODEL_PATH)
+        cpp_net = mcts_cpp.NeuralNetwork(MODEL_PATH, QUEUE_SIZE)
         dataset = []
         
-        for g in range(GAMES_PER_EPOCH):
-            print(f"  Self-play game {g}...")
-            pool.reset() # Reset memory before new game
-            samples = run_self_play(cpp_net, pool)
-            dataset.extend(samples)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+            future_to_game = [executor.submit(run_self_play, cpp_net) for _ in range(GAMES_PER_EPOCH)]
+            
+            with tqdm(total=GAMES_PER_EPOCH, desc=f"Epoch {epoch+1} Self-Play", unit="game") as pbar:
+                for future in concurrent.futures.as_completed(future_to_game):
+                    try:
+                        samples = future.result()
+                        dataset.extend(samples)
+                    except Exception as exc:
+                        pbar.write(f"  Game generated an exception: {exc}")
+                    finally:
+                        pbar.update(1)
+
             
         states = torch.tensor(np.array([s[0] for s in dataset])).float().to(device)
         pis = torch.tensor(np.array([s[1] for s in dataset])).float().to(device)

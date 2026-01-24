@@ -4,6 +4,7 @@
 
 
 
+template<bool training>
 class MCTS {
         public:
                 struct SearchResult {
@@ -11,7 +12,7 @@ class MCTS {
                         std::vector<std::pair<int, uint32_t>> visit_counts; // <move_index, visits>
                         float root_value;
                 };
-                MCTS(NodePool& pool);
+                MCTS(NodePool<training>& pool, const int n_threads = 1);
                 
                 MCTS::SearchResult search(const GameState &root, std::shared_ptr<NeuralNetwork> nn, const size_t iterations);
                 void start_new_game();
@@ -19,7 +20,12 @@ class MCTS {
 
 
         private:
-                void perform_iteration(MCTSNode* root_node, GameState state, std::shared_ptr<NeuralNetwork> nn);
-                NodePool& pool;
-                MCTSNode* root_node = nullptr;
+                bool expand(MCTSNode<training>* node, GameState &state, std::shared_ptr<NeuralNetwork> nn, float &value);
+                bool perform_iteration(MCTSNode<training>* root_node, GameState state, std::shared_ptr<NeuralNetwork> nn);
+
+                NodePool<training>& pool;
+                int num_threads = 1;
+                MCTSNode<training>* root_node = nullptr;
+
+                uint8_t search_depth = 0;
 };

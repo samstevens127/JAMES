@@ -17,7 +17,7 @@ struct EvalResult {
 
 class NeuralNetwork {
   public:
-    NeuralNetwork(const std::string& model_path, int batch_size = 64);
+    NeuralNetwork(const std::string& model_path, int batch_size = 128);
     ~NeuralNetwork();
 
     // returns a future that will be fulfilled by the batcher
