@@ -1,3 +1,4 @@
+#include <torch/extension.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -45,10 +46,7 @@ PYBIND11_MODULE(mcts_cpp, m) {
         .def(py::init<const std::string&,const std::string&, int>(), py::arg("path"), py::arg("device"), py::arg("queue_size") = 16)
         .def("evaluate", &NeuralNetwork::evaluate_async)
         .def("get_encoded_state", [](NeuralNetwork &self, const GameState &state) {
-                auto encoded = encode_state(state); 
-                auto arr = py::array_t<float>({48, 9, 9}); // Use 48 from types.h
-                std::memcpy(arr.mutable_data(), encoded.data(), encoded.size() * sizeof(float));
-                return arr;
+                        return encode_state(state);
         }, py::arg("state"));
         py::class_<NodePool<true>>(m, "NodePool")
                 .def(py::init<>())

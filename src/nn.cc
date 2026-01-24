@@ -31,7 +31,6 @@ std::future<EvalResult> NeuralNetwork::evaluate_async(const GameState &state)
         auto future = promise.get_future();
         
         EncodedState encoded = encode_state(state);
-        
         {
                 std::lock_guard<std::mutex> lock(queue_mtx);
                 queue.push({encoded, std::move(promise)});
@@ -49,7 +48,6 @@ void NeuralNetwork::batcher_loop()
                 {
                         std::unique_lock<std::mutex> lock(queue_mtx);
                         cv.wait(lock, [this] { return !queue.empty() || !running; });
-                        
                         if (!running && queue.empty()) break;
 
                         auto timeout = std::chrono::milliseconds(3);
@@ -58,7 +56,6 @@ void NeuralNetwork::batcher_loop()
                                 return queue.size() >= (size_t)queue_size; 
                         });
                         
-                        // Drain queue
                         while (!queue.empty() && batch.size() < (size_t)queue_size) {
                                 batch.push_back(std::move(queue.front()));
                                 queue.pop();
@@ -68,18 +65,13 @@ void NeuralNetwork::batcher_loop()
                 
                 
                 try {
-                        // Prepare Batch Tensor
-                        std::vector<float> flat_input;
-                        flat_input.reserve(batch.size() * 48 * 9 * 9);
-                        for (const auto& req : batch) 
-                                flat_input.insert(flat_input.end(), req.state.begin(), req.state.end());
-                        
-                        
-                        auto opts = torch::TensorOptions().dtype(torch::kFloat32);
-                        torch::Tensor input_tensor = torch::from_blob(flat_input.data(), 
-                                {(long)batch.size(), 48, 9, 9}, opts).clone().to(device);
+                        std::vector<torch::Tensor> states_to_batch;
+                        states_to_batch.reserve(batch.size());
+                        for (const auto& req : batch) {
+                                states_to_batch.push_back(req.state);
+                        }
 
-                        // Inference
+                        torch::Tensor input_tensor = torch::stack(states_to_batch).to(device);
 
                         auto outputs = module.forward({input_tensor}).toTuple();
                         at::Tensor p_batch = outputs->elements()[0].toTensor().softmax(1).cpu();

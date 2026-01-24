@@ -16,9 +16,7 @@
 #include <span>
 #include "encoder.h"
 
-
-
-using EncodedState = std::array<float, 48 * 9 * 9>;
+using EncodedState = torch::Tensor;
 
 struct GameState {
         explicit GameState(nshogi::core::State&& s)
@@ -83,17 +81,24 @@ struct alignas(64) MCTSNode {
         template <float cpuct = 2.5f>
         float puct(uint32_t &parent_visits) const 
         {
-                float s,n,vl;
+                float s,n,vl,q,sp,np, penalty;
                 if constexpr (!training) {
                         n = static_cast<float>(visits.load(std::memory_order_relaxed));
+                        np = static_cast<float>(parent_ptr->visits.load(std::memory_order_relaxed));
                         vl = static_cast<float>(virtual_loss.load(std::memory_order_relaxed));
                         s = value_sum.load(std::memory_order_relaxed);
+                        sp = parent_ptr->value_sum.load(std::memory_order_relaxed);
+                        penalty = 0.5f * sqrt(prior);
+                        q = (n == 0.0) ? sp/np - penalty : s / n;
                 } else {
                         n = static_cast<float>(visits);
+                        np = static_cast<float>(parent_ptr->visits);
                         s = value_sum;
+                        sp = parent_ptr->value_sum;
                         vl = 0.0f;
+                        penalty = 0.5f * sqrt(prior);
+                        q = (n == 0.0) ? sp/np - penalty : s / n;
                 }
-                float q = (n == 0.0) ? 0.0f : s / n;
                 float u = cpuct * prior *
                 std::sqrt((float)parent_visits) / (1.0f + n + vl);
                 return q + u;

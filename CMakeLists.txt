@@ -51,5 +51,6 @@ target_link_libraries(mcts_cpp PRIVATE
     pybind11::module
     Python3::Module
     "${TORCH_LIBRARIES}"
+    torch_python
     nshogi
 )

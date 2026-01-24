@@ -6,6 +6,7 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, TensorDataset
 from torch.utils.data.distributed import DistributedSampler
+from torch.cuda.amp import autocast, GradScaler
 from tqdm import tqdm
 import numpy as np
 import os
@@ -139,19 +140,25 @@ def main_worker(rank, world_size):
         
         for b_states, b_pis, b_vs in train_loader:
             optimizer.zero_grad()
-            p_logits, v_pred = model(b_states)
-
-            loss_v = nn.MSELoss()(v_pred.squeeze(), b_vs)
-            log_pis = nn.LogSoftmax(dim=1)(p_logits)
-            loss_p = -(b_pis * log_pis).sum(dim=1).mean()
+            dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
             
-            loss = loss_v + loss_p
+            with autocast(device_type='cuda', dtype=dtype):
+                p_logits, v_pred = model(aug_states)
+                
+                loss_v = nn.MSELoss()(v_pred.squeeze(), aug_vs)
+                loss_p = -(aug_pis * torch.log_softmax(p_logits, dim=1)).sum(dim=1).mean()
+                loss = loss_v + loss_p
+
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
 
         if rank == 0:
             print(f"Epoch {epoch+1} Loss: {total_loss / len(train_loader):.4f}")
+            if (epoch + 1) % 10 == 0:
+                cp_path = os.path.join(CHECKPOINT_DIR, f"shogi_epoch_{epoch+1}.pt")
+                script_model.save(cp_path)
+                print(f"Saved checkpoint: {cp_path}")
 
     cleanup()
 
