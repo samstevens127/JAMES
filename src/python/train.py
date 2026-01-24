@@ -147,6 +147,18 @@ LEARNING_RATE = 0.01
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ShogiNet().to(device)
+
+    if os.path.exists(MODEL_PATH):
+        print(f"Loading existing model from {MODEL_PATH}...")
+        try:
+            loaded_script = torch.jit.load(MODEL_PATH)
+            model.load_state_dict(loaded_script.state_dict())
+            print("Successfully loaded weights.")
+        except Exception as e:
+            print(f"Could not load existing model, starting from scratch. Error: {e}")
+    else:
+        print("No existing model found. Starting from scratch.")
+
     
     script_model = torch.jit.script(model)
     script_model.save(MODEL_PATH)
