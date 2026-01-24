@@ -5,11 +5,18 @@
 *.slo
 *.lo
 *.o
+*.so
 *.obj
 
 # Precompiled Headers
 *.gch
 *.pch
+
+__pycache__
+
+*.egg.info
+build/
+*.pt
 
 # Linker files
 *.ilk
