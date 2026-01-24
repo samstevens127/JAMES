@@ -3,9 +3,9 @@
 #include <chrono>
 #include <iostream>
 
-NeuralNetwork::NeuralNetwork(const std::string& model_path, int b_size) 
-  : device(torch::kCUDA), queue_size(b_size), running(false) 
-{ 
+NeuralNetwork::NeuralNetwork(const std::string& model_path,const std::string& device_str, int b_size) 
+  : device_str(device_str),device(device_str), queue_size(b_size), running(false) 
+{  
         module = torch::jit::load(model_path);
         module.to(device);
         module.eval();

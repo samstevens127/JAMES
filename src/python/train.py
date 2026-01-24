@@ -1,218 +1,162 @@
 import torch
-from tqdm import tqdm
-import concurrent.futures
 import torch.nn as nn
 import torch.optim as optim
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, TensorDataset
-import torch.nn.functional as F
+from torch.utils.data.distributed import DistributedSampler
+from tqdm import tqdm
 import numpy as np
-import mcts_cpp  # Your compiled C++ module
 import os
+import concurrent.futures
 
-torch.set_num_threads(1) 
-torch.set_num_interop_threads(1)
+import mcts_cpp 
+from model import ShogiNet
 
-class BasicBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(BasicBlock, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+# --- Configuration ---
+MODEL_PATH = "shogi_net.pt"
+ITERATIONS = 800  
+GAMES_PER_EPOCH = 500
+MAX_MOVES = 250
+BATCH_SIZE = 128    # Training Batch Size
+QUEUE_SIZE = 64     # Inference Queue Size 
+NUM_WORKERS = 128   # Self-play threads per GPU
+LEARNING_RATE = 0.01
 
-    def forward(self, x):
-        residual = x
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = F.relu(out)
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out += residual
-        out = F.relu(out)
-        return out
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    # Initialize the process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    # Set the device for this process
+    torch.cuda.set_device(rank)
 
-class ShogiNet(nn.Module):
-    def __init__(self, num_blocks=10, channels=256):
-        super().__init__()
-        
-        # Initial Convolution
-        self.conv1 = nn.Conv2d(48, channels, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(channels)
-        
-        # Residual Tower
-        self.res_blocks = nn.ModuleList([
-            BasicBlock(channels, channels) for _ in range(num_blocks)
-        ])
-        
-        # Policy Head
-        self.p_conv = nn.Conv2d(channels, 32, kernel_size=1, bias=False)
-        self.p_bn = nn.BatchNorm2d(32)
-        self.p_fc = nn.Linear(32 * 9 * 9, 13932)
-        
-        # Value Head
-        self.v_conv = nn.Conv2d(channels, 1, kernel_size=1, bias=False)
-        self.v_bn = nn.BatchNorm2d(1)
-        self.v_fc1 = nn.Linear(9 * 9, 64)
-        self.v_fc2 = nn.Linear(64, 1)
+def cleanup():
+    dist.destroy_process_group()
 
-    def forward(self, x):
-        # Input
-        x = F.relu(self.bn1(self.conv1(x)))
-        
-        # Tower
-        for block in self.res_blocks:
-            x = block(x)
-            
-        # Policy Head
-        p = F.relu(self.p_bn(self.p_conv(x)))
-        p = p.view(p.size(0), -1)
-        p = self.p_fc(p) 
-        
-        # Value Head
-        v = F.relu(self.v_bn(self.v_conv(x)))
-        v = v.view(v.size(0), -1)
-        v = F.relu(self.v_fc1(v))
-        v = torch.tanh(self.v_fc2(v))
-        
-        return p, v
-
-# Self-Play 
-def run_self_play(nnet):
+def run_self_play(rank, model_path):
+    device_str = f"cuda:{rank}"
+    
+    cpp_net = mcts_cpp.NeuralNetwork(model_path, device_str, QUEUE_SIZE)
+    
     pool = mcts_cpp.NodePool() 
-
-    mcts = mcts_cpp.JAMES_trainer(pool,1)
+    mcts = mcts_cpp.JAMES_trainer(pool, 1)
     mcts.start_new_game()
+    state = mcts_cpp.GameState.initial()
     
-    state = mcts_cpp.GameState.initial() 
+    game_history = []
+    move_count = 0
     
-    game_history = [] 
-    
-    move_count = 1
-    while not state.is_terminal():
-        search_result = mcts.search(state, nnet, ITERATIONS)
+    while not state.is_terminal() and move_count < MAX_MOVES:
+        search_result = mcts.search(state, cpp_net, ITERATIONS)
         move_count += 1
-
-        if str(search_result.best_move) == "None" or len(search_result.visit_counts) == 0:
-            print("No valid move found (Resign/Mate). Ending game.")
-            break
         
+        if str(search_result.best_move) == "None" or len(search_result.visit_counts) == 0:
+            break
+
         policy_target = np.zeros(13932, dtype=np.float32)
         total_visits = sum(cnt for _, cnt in search_result.visit_counts)
-
-        
         for move_idx, count in search_result.visit_counts:
             if move_idx < 13932:
                 policy_target[move_idx] = count / total_visits
         
-        encoded = nnet.get_encoded_state(state) 
+        encoded = cpp_net.get_encoded_state(state)
         game_history.append([encoded, policy_target])
         
-        best_move = search_result.best_move
-        state.do_move(best_move)
-        mcts.update_root(state, best_move)
+        state.do_move(search_result.best_move)
+        mcts.update_root(state, search_result.best_move)
 
-        if move_count > MAX_MOVES:
-            break
-        
-
-    if move_count > MAX_MOVES:
-        final_result = 0.0
-    else:
-        final_result = state.result() 
-    
+    # Value processing
+    final_result = state.result() if move_count <= MAX_MOVES else 0.0
     processed_samples = []
-    current_reward = final_result 
-    
+    current_reward = final_result
     for i in reversed(range(len(game_history))):
         encoded, policy = game_history[i]
-        current_reward = -current_reward 
+        current_reward = -current_reward
         processed_samples.append((encoded, policy, current_reward))
         
     return processed_samples
 
+def main_worker(rank, world_size):
+    setup(rank, world_size)
 
-#  Configuration
-MODEL_PATH = "shogi_net.pt"
-
-ITERATIONS = 800  # MCTS simulations per move
-GAMES_PER_EPOCH = 500
-MAX_MOVES = 250
-
-BATCH_SIZE = 128
-QUEUE_SIZE = 128
-NUM_WORKERS = 256
-
-LEARNING_RATE = 0.01
-
-if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{rank}")
     model = ShogiNet().to(device)
-
+    
     if os.path.exists(MODEL_PATH):
-        print(f"Loading existing model from {MODEL_PATH}...")
-        try:
-            loaded_script = torch.jit.load(MODEL_PATH)
-            model.load_state_dict(loaded_script.state_dict())
-            print("Successfully loaded weights.")
-        except Exception as e:
-            print(f"Could not load existing model, starting from scratch. Error: {e}")
+        loaded_script = torch.jit.load(MODEL_PATH, map_location=device)
+        model.load_state_dict(loaded_script.state_dict())
+        if rank == 0:
+            print(f"Loaded existing model weights.")
     else:
-        print("No existing model found. Starting from scratch.")
+        if rank == 0:
+            print(f"No model found at {MODEL_PATH}. Initializing random weights.")
+            model.eval()
+            script_model = torch.jit.script(model)
+            script_model.save(MODEL_PATH)
+            print(f"Initial random model saved to {MODEL_PATH}")
 
-    
-    script_model = torch.jit.script(model)
-    script_model.save(MODEL_PATH)
-    
-    
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    
+    model = DDP(model, device_ids=[rank])
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
+
     for epoch in range(100):
-        print(f"Epoch {epoch+1}...")
+        if rank == 0:
+            model.eval()
+            script_model = torch.jit.script(model.module) 
+            script_model.save(MODEL_PATH)
+            print(f"Epoch {epoch+1} started. Model saved for workers.")
         
-        cpp_net = mcts_cpp.NeuralNetwork(MODEL_PATH, QUEUE_SIZE)
-        dataset = []
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
-            future_to_game = [executor.submit(run_self_play, cpp_net) for _ in range(GAMES_PER_EPOCH)]
-            
-            with tqdm(total=GAMES_PER_EPOCH, desc=f"Epoch {epoch+1} Self-Play", unit="game") as pbar:
-                for future in concurrent.futures.as_completed(future_to_game):
-                    try:
-                        samples = future.result()
-                        dataset.extend(samples)
-                    except Exception as exc:
-                        pbar.write(f"  Game generated an exception: {exc}")
-                    finally:
-                        pbar.update(1)
+        dist.barrier()
 
+        local_games = GAMES_PER_EPOCH // world_size
+        local_dataset = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+            futures = [executor.submit(run_self_play, rank, MODEL_PATH) for _ in range(local_games)]
             
-        states = torch.tensor(np.array([s[0] for s in dataset])).float().to(device)
-        pis = torch.tensor(np.array([s[1] for s in dataset])).float().to(device)
-        vs = torch.tensor(np.array([s[2] for s in dataset])).float().to(device)
+            if rank == 0:
+                iterator = tqdm(concurrent.futures.as_completed(futures), total=local_games, desc="Self-Play")
+            else:
+                iterator = concurrent.futures.as_completed(futures)
+
+            for f in iterator:
+                try:
+                    local_dataset.extend(f.result())
+                except Exception as e:
+                    print(f"Rank {rank} error: {e}")
+
+        states = torch.tensor(np.array([s[0] for s in local_dataset])).float().to(device)
+        pis = torch.tensor(np.array([s[1] for s in local_dataset])).float().to(device)
+        vs = torch.tensor(np.array([s[2] for s in local_dataset])).float().to(device)
+
+        dataset = TensorDataset(states, pis, vs)
         
+        train_loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+
         model.train()
-        dataset_torch = TensorDataset(states, pis, vs)
-        loader = DataLoader(dataset_torch, batch_size=BATCH_SIZE, shuffle=True)
-        
         total_loss = 0
-        for b_states, b_pis, b_vs in loader:
+        
+        for b_states, b_pis, b_vs in train_loader:
             optimizer.zero_grad()
-            pred_pis_logits, pred_vs = model(b_states)
-            
-            # Loss =  Value MSE + Policy CrossEntropy
-            loss_v = nn.MSELoss()(pred_vs.squeeze(), b_vs)
-            
-            # Policy Loss (Cross Entropy with Softmax included in LogSoftmax)
-            log_pis = nn.LogSoftmax(dim=1)(pred_pis_logits)
+            p_logits, v_pred = model(b_states)
+
+            loss_v = nn.MSELoss()(v_pred.squeeze(), b_vs)
+            log_pis = nn.LogSoftmax(dim=1)(p_logits)
             loss_p = -(b_pis * log_pis).sum(dim=1).mean()
             
             loss = loss_v + loss_p
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
-            
-        print(f"  Loss: {total_loss / len(loader):.4f}")
-        
-        model.eval()
-        script_model = torch.jit.script(model)
-        script_model.save(MODEL_PATH)
+
+        if rank == 0:
+            print(f"Epoch {epoch+1} Loss: {total_loss / len(train_loader):.4f}")
+
+    cleanup()
+
+if __name__ == "__main__":
+    world_size = torch.cuda.device_count()
+    print(f"Found {world_size} GPUs. Starting DDP...")
+    
+    mp.spawn(main_worker, args=(world_size,), nprocs=world_size, join=True)

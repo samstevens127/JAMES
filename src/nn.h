@@ -17,7 +17,7 @@ struct EvalResult {
 
 class NeuralNetwork {
   public:
-    NeuralNetwork(const std::string& model_path, int batch_size = 128);
+    NeuralNetwork(const std::string& model_path, const std::string& device_str, int batch_size = 128);
     ~NeuralNetwork();
 
     // returns a future that will be fulfilled by the batcher
@@ -30,6 +30,7 @@ class NeuralNetwork {
     void batcher_loop(); // Background thread function
 
     torch::jit::script::Module module;
+    std::string device_str;
     torch::Device device;
     int queue_size;
     std::atomic<bool> running;
