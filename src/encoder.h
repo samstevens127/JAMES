@@ -6,6 +6,7 @@ struct GameState;
 using EncodedState = torch::Tensor;
 
 int encode_move(const GameState& state, nshogi::core::Move32 move);
+int get_mirrored_move_index(int move_idx);
 EncodedState encode_state(const GameState &state);
 
 // encoded both state and mirror for training

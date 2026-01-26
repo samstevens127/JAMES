@@ -23,7 +23,7 @@ ITERATIONS = 800
 GAMES_PER_EPOCH = 500
 MAX_MOVES = 250
 BATCH_SIZE = 64    # Training Batch Size
-QUEUE_SIZE = 32     # Inference Queue Size 
+QUEUE_SIZE = 128     # Inference Queue Size 
 NUM_WORKERS = 64   # Self-play threads per GPU
 LEARNING_RATE = 0.01
 
@@ -38,10 +38,8 @@ def setup(rank, world_size):
 def cleanup():
     dist.destroy_process_group()
 
-def run_self_play(rank, model_path):
-    device_str = f"cuda:{rank}"
+def run_self_play(rank, cpp_net):
     
-    cpp_net = mcts_cpp.NeuralNetwork(model_path, device_str, QUEUE_SIZE)
     
     pool = mcts_cpp.NodePool() 
     mcts = mcts_cpp.JAMES_trainer(pool, 1)
@@ -51,6 +49,7 @@ def run_self_play(rank, model_path):
     game_history = []
     move_count = 0
 
+    temperature_threshold = 30
 
     while not state.is_terminal() and move_count < MAX_MOVES:
         with torch.no_grad():
@@ -71,8 +70,18 @@ def run_self_play(rank, model_path):
             if move_idx < 13932:
                 policy_target[move_idx] = count / total_visits
         
-        encoded = cpp_net.get_encoded_state(state)
-        game_history.append([encoded, policy_target])
+        encoded, mirrored_state = mcts_cpp.encode_state_mirror(state)
+
+        policy_mirror = np.zeros(13932, dtype=np.float32)
+        for i in range(13932):
+            if policy_target[i] > 0:
+                mirrored_idx = mcts_cpp.get_mirrored_move_index(i)
+                policy_mirror[mirrored_idx] = policy_target[i]
+
+        game_history.append([
+            (encoded, policy_target),
+            (mirrored_state, policy_mirror)
+        ])
         
         state.do_move(search_result.best_move)
         mcts.update_root(state, search_result.best_move)
@@ -82,15 +91,20 @@ def run_self_play(rank, model_path):
     processed_samples = []
     current_reward = final_result
     for i in reversed(range(len(game_history))):
-        encoded, policy = game_history[i]
-        current_reward = -current_reward
-        processed_samples.append((encoded, policy, current_reward))
+        (normal_enc, normal_pol), (mirror_enc, mirror_pol) = game_history[i]
         
+        current_reward = -current_reward
+
+        processed_samples.append((normal_enc, normal_pol, current_reward))
+        processed_samples.append((mirror_enc, mirror_pol, current_reward))
+
     torch.cuda.empty_cache()
     return processed_samples
 
 def main_worker(rank, world_size):
     setup(rank, world_size)
+
+    device_str = f"cuda:{rank}"
 
     device = torch.device(f"cuda:{rank}")
     model = ShogiNet().to(device)
@@ -111,6 +125,8 @@ def main_worker(rank, world_size):
     model = DDP(model, device_ids=[rank])
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)
 
+    cpp_net = mcts_cpp.NeuralNetwork(MODEL_PATH, device_str, QUEUE_SIZE)
+
     for epoch in range(100):
         if rank == 0:
             model.eval()
@@ -124,7 +140,7 @@ def main_worker(rank, world_size):
         local_dataset = []
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
-            futures = [executor.submit(run_self_play, rank, MODEL_PATH) for _ in range(local_games)]
+            futures = [executor.submit(run_self_play, rank, cpp_net) for _ in range(local_games)]
             
             if rank == 0:
                 iterator = tqdm(concurrent.futures.as_completed(futures), total=local_games, desc="Self-Play")
@@ -137,9 +153,9 @@ def main_worker(rank, world_size):
                 except Exception as e:
                     print(f"Rank {rank} error: {e}")
 
-        states = torch.tensor(np.array([s[0] for s in local_dataset])).float().to(device)
-        pis = torch.tensor(np.array([s[1] for s in local_dataset])).float().to(device)
-        vs = torch.tensor(np.array([s[2] for s in local_dataset])).float().to(device)
+        states = torch.tensor(np.array([s[0] for s in local_dataset])).float()
+        pis = torch.tensor(np.array([s[1] for s in local_dataset])).float()
+        vs = torch.tensor(np.array([s[2] for s in local_dataset])).float()
 
         dataset = TensorDataset(states, pis, vs)
         
@@ -149,6 +165,10 @@ def main_worker(rank, world_size):
         total_loss = 0
         
         for b_states, b_pis, b_vs in train_loader:
+            b_states = b_states.to(device, non_blocking = true) 
+            b_pis    = b_pis.to(device, non_blocking = true) 
+            b_vs     = b_vs.to(device, non_blocking = true) 
+
             optimizer.zero_grad()
             dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
             

@@ -14,6 +14,10 @@ namespace py = pybind11;
 
 PYBIND11_MODULE(mcts_cpp, m) {
         nshogi::core::initializer::initializeAll();
+
+        m.def("encode_state_mirror", &encode_state_mirror, "Get both normal and mirrored state tensors");
+        m.def("get_mirrored_move_index", &get_mirrored_move_index, "convert move to mirrored index");
+
         
         py::class_<MCTS<true>::SearchResult>(m, "SearchResult")
                 .def_readonly("best_move", &MCTS<true>::SearchResult::best_move)
