@@ -23,6 +23,9 @@ class MCTS {
                 bool expand(MCTSNode<training>* node, GameState &state, std::shared_ptr<NeuralNetwork> nn, float &value);
                 bool perform_iteration(MCTSNode<training>* root_node, GameState state, std::shared_ptr<NeuralNetwork> nn);
 
+                std::mt19937 gen{std::random_device{}()};
+
+
                 NodePool<training>& pool;
                 int num_threads = 1;
                 MCTSNode<training>* root_node = nullptr;

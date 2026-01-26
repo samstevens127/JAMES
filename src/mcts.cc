@@ -189,6 +189,7 @@ bool MCTS<training>::perform_iteration(MCTSNode<training>* root_node, GameState 
  * size_t iterations
  */
 
+
 template<bool training>
 typename MCTS<training>::SearchResult MCTS<training>::search(const GameState &root_state,
                                 std::shared_ptr<NeuralNetwork> nn,
@@ -215,6 +216,11 @@ typename MCTS<training>::SearchResult MCTS<training>::search(const GameState &ro
                 for (auto &t : workers) t.join();
 
         } else {
+                if (!root_node->expanded ) {
+                        perform_iteration(root_node, root_state.clone(), nn);
+                }
+                root_node->apply_dirichlet_noise(0.25f, 0.15f, gen);
+
                 for (size_t i = 0; i < iterations; i++)
                         perform_iteration(root_node, root_state.clone(), nn);
         }

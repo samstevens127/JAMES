@@ -6,6 +6,7 @@
 #include <nshogi/io/sfen.h>
 #include <torch/torch.h>
 #include <vector>
+#include <random>
 #include <type_traits>
 #include <deque>
 #include <array>
@@ -44,6 +45,7 @@ struct GameState {
         float result() const; 
         void do_move(nshogi::core::Move32 m);
         void undo_move();
+
 
 };
 
@@ -125,6 +127,23 @@ struct alignas(64) MCTSNode {
         void expand_with_policy(const GameState &gamestate, const at::Tensor &pi, NodePool<training> &pool);
         
         bool is_leaf() { return children().size() == 0; }
+
+        void apply_dirichlet_noise(float epsilon, float alpha, std::mt19937 &gen) {
+                if (num_children == 0) return;
+
+                std::gamma_distribution<float> dist(alpha, 1.0f);
+
+                std::vector<float> noise(num_children);
+                float sum = 0.0f;
+                for (uint32_t i = 0; i < num_children; ++i) {
+                        noise[i] = dist(gen);
+                        sum += noise[i];
+                }
+
+                for (uint32_t i = 0; i < num_children; ++i) {
+                        children_data[i].prior = (1.0f - epsilon) * children_data[i].prior + epsilon * (noise[i] / sum);
+                }
+        }
 
         private:
                 MCTSNode<training>* children_data;

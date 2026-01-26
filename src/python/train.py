@@ -15,14 +15,16 @@ import concurrent.futures
 import mcts_cpp 
 from model import ShogiNet
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True,garbage_collection_threshold:0.6"
+
 # --- Configuration ---
 MODEL_PATH = "shogi_net.pt"
 ITERATIONS = 800  
 GAMES_PER_EPOCH = 500
 MAX_MOVES = 250
-BATCH_SIZE = 128    # Training Batch Size
-QUEUE_SIZE = 64     # Inference Queue Size 
-NUM_WORKERS = 128   # Self-play threads per GPU
+BATCH_SIZE = 64    # Training Batch Size
+QUEUE_SIZE = 32     # Inference Queue Size 
+NUM_WORKERS = 64   # Self-play threads per GPU
 LEARNING_RATE = 0.01
 
 def setup(rank, world_size):
@@ -48,16 +50,23 @@ def run_self_play(rank, model_path):
     
     game_history = []
     move_count = 0
-    
+
+
     while not state.is_terminal() and move_count < MAX_MOVES:
-        search_result = mcts.search(state, cpp_net, ITERATIONS)
+        with torch.no_grad():
+            search_result = mcts.search(state, cpp_net, ITERATIONS)
         move_count += 1
         
         if str(search_result.best_move) == "None" or len(search_result.visit_counts) == 0:
             break
+        temp = 1.0 if move_count < temperature_threshold else 0.01
+                
+        # apply temperature to visit Counts
+        visit_counts = np.array([n for _, n in search_result.visit_counts], dtype=np.float32)
 
         policy_target = np.zeros(13932, dtype=np.float32)
         total_visits = sum(cnt for _, cnt in search_result.visit_counts)
+
         for move_idx, count in search_result.visit_counts:
             if move_idx < 13932:
                 policy_target[move_idx] = count / total_visits
@@ -77,6 +86,7 @@ def run_self_play(rank, model_path):
         current_reward = -current_reward
         processed_samples.append((encoded, policy, current_reward))
         
+    torch.cuda.empty_cache()
     return processed_samples
 
 def main_worker(rank, world_size):

@@ -29,6 +29,9 @@ std::future<EvalResult> NeuralNetwork::evaluate_async(const GameState &state)
 {
         std::promise<EvalResult> promise;
         auto future = promise.get_future();
+        if (queue.size() > 512) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
         
         EncodedState encoded = encode_state(state);
         {
@@ -83,7 +86,7 @@ void NeuralNetwork::batcher_loop()
                         }
                         
                 } catch (const std::exception& e) {
-                        std::cerr << "Inference failed!" << std::endl;
+                        std::cerr << "Inference failed! Reason: " << e.what() << std::endl;
                             for (auto& req : batch) {
                                 req.promise.set_value({torch::zeros({13932}), 0.0f}); 
                             }
